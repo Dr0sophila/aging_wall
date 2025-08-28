@@ -1,0 +1,6 @@
+paths:
+  o_positive_path: "E:/data/Aging_walls/positive"
+  positive_path: "E:/data/Aging_walls/processed/positive"
+
+  o_negative_path: "E:/data/Aging_walls/negative"
+  negative_path: "E:/data/Aging_walls/processed/negative"
