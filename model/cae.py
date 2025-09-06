@@ -1,6 +1,7 @@
-import torch
 import torch.nn as nn
-import math
+import os, math, torch
+import torch.nn.functional as F
+from torchvision import utils as vutils
 
 
 class DownBlock(nn.Module):
@@ -44,8 +45,7 @@ class AutoEncoder1024(nn.Module):
     - Works with grayscale (in_channels=1) or RGB (in_channels=3).
     """
 
-    def __init__(self, in_channels: int = 3, base_ch: int = 32,
-                 latent_dim: int = 1024):  # bottleneck size
+    def __init__(self, in_channels: int = 3, base_ch: int = 32, latent_dim: int = 1024):  # bottleneck size
         super().__init__()
 
         # Channel schedule
@@ -57,6 +57,7 @@ class AutoEncoder1024(nn.Module):
         ch6 = base_ch * 8  # 256
         ch7 = base_ch * 8  # 256
         bottleneck_ch = base_ch * 8  # 256; spatial 8x8
+        self.bottleneck_ch = bottleneck_ch
 
         # Encoder: stride=2 in first conv of each block to downsample
         self.enc1 = DownBlock(in_channels, ch1, stride=2)  # 1024 -> 512
@@ -111,9 +112,7 @@ class AutoEncoder1024(nn.Module):
         x = self.from_latent(z)
         # reshape to (B, C, 8, 8)
         batch = z.size(0)
-        # bottleneck_ch = base_ch*8; recover from modules
-        bottleneck_ch = self.dec1.up.in_channels
-        x = x.view(batch, bottleneck_ch, 8, 8)
+        x = x.view(batch, self.bottleneck_ch, 8, 8)
 
         x = self.dec1(x)
         x = self.dec2(x)
@@ -129,3 +128,165 @@ class AutoEncoder1024(nn.Module):
         z, _ = self.encode(x)
         x_rec = self.decode(z)
         return x_rec, z
+
+
+@torch.no_grad()
+def _psnr(x, y, eps=1e-8):
+    # x,y in [0,1]
+    mse = F.mse_loss(x, y, reduction='mean').clamp_min(eps)
+    return 10.0 * torch.log10(1.0 / mse)
+
+
+@torch.no_grad()
+def _evaluate(model, loader, device, sample_dir=None, epoch=0, max_grids=2, grid_n=4):
+    model.eval()
+    totals = {'mse': 0.0, 'mae': 0.0, 'psnr': 0.0}
+    count = 0
+    saved = 0
+
+    for imgs, _ in loader:
+        imgs = imgs.to(device, non_blocking=True)
+        rec, _ = model(imgs)
+
+        mse = F.mse_loss(rec, imgs, reduction='mean').item()
+        mae = F.l1_loss(rec, imgs, reduction='mean').item()
+        p = _psnr(rec, imgs).item()
+
+        b = imgs.size(0)
+        totals['mse'] += mse * b
+        totals['mae'] += mae * b
+        totals['psnr'] += p * b
+        count += b
+
+        if sample_dir and saved < max_grids:
+            grid = vutils.make_grid(torch.cat([imgs[:grid_n], rec[:grid_n]], dim=0), nrow=grid_n)
+            os.makedirs(sample_dir, exist_ok=True)
+            vutils.save_image(grid, os.path.join(sample_dir, f"val_ep{epoch:03d}_{saved:02d}.png"))
+            saved += 1
+
+    if count == 0:  # empty loader
+        return {k: float("nan") for k in totals}
+
+    return {k: v / count for k, v in totals.items()}
+
+
+def train(model, train_loader, val_loader=None, *, epochs=50, lr=2e-4, weight_decay=1e-4, betas=(0.9, 0.99),
+          clip_grad=1.0, amp=True, device=None, outdir="runs/ae1024", save_every=5, resume_path="", log_interval=50,
+          loss_mix=None,  # None or float in [0,1]: loss = (1-a)*MSE + a*L1
+          ):
+    """
+    Train an autoencoder.
+    - model: your AutoEncoder1024 (already constructed)
+    - train_loader / val_loader: PyTorch DataLoader(s) yielding (image, label)
+    - device: torch.device or 'cuda'/'cpu' (auto-detected if None)
+    - loss_mix: if set to `a` (e.g., 0.3), uses loss = (1-a)*MSE + a*L1
+    Returns: history dict with per-epoch metrics and the path to best checkpoint.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    ckpt_dir = os.path.join(outdir, "ckpts");
+    os.makedirs(ckpt_dir, exist_ok=True)
+    sample_dir = os.path.join(outdir, "samples");
+    os.makedirs(sample_dir, exist_ok=True)
+
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, betas=betas)
+    scaler = torch.cuda.amp.GradScaler(enabled=(amp and device.type == 'cuda'))
+
+    start_epoch = 1
+    best_val_mse = float('inf')
+    best_path = ""
+
+    # optional resume
+    if resume_path and os.path.isfile(resume_path):
+        ckpt = torch.load(resume_path, map_location='cpu')
+        model.load_state_dict(ckpt['model'])
+        opt.load_state_dict(ckpt['opt'])
+        scaler.load_state_dict(ckpt['scaler'])
+        start_epoch = ckpt['epoch'] + 1
+        best_val_mse = ckpt.get('best_val_mse', best_val_mse)
+        print(f"[train] Resumed from {resume_path} at epoch {start_epoch - 1}")
+
+    history = []
+    for epoch in range(start_epoch, epochs + 1):
+        model.train()
+        running = {'mse': 0.0, 'mae': 0.0}
+        seen = 0
+
+        print(f"\n[train] Epoch {epoch}/{epochs}")
+        for step, (imgs, _) in enumerate(train_loader, 1):
+            imgs = imgs.to(device, non_blocking=True)
+
+            opt.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(amp and device.type == 'cuda')):
+                rec, _ = model(imgs)
+                mse = F.mse_loss(rec, imgs)
+                if loss_mix is None:
+                    loss = mse
+                else:
+                    mae = F.l1_loss(rec, imgs)
+                    loss = (1.0 - loss_mix) * mse + loss_mix * mae
+
+            scaler.scale(loss).backward()
+            if clip_grad is not None:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+            scaler.step(opt)
+            scaler.update()
+
+            b = imgs.size(0)
+            running['mse'] += mse.detach().item() * b
+            if loss_mix is not None:
+                running['mae'] += F.l1_loss(rec.detach(), imgs, reduction='mean').item() * b
+            else:
+                running['mae'] += F.l1_loss(rec.detach(), imgs, reduction='mean').item() * b
+            seen += b
+
+            if log_interval and step % log_interval == 0:
+                print(f"  step {step:5d} | mse {running['mse'] / seen:.6f} | mae {running['mae'] / seen:.6f}")
+
+        # end epoch — training metrics
+        train_metrics = {k: v / max(seen, 1) for k, v in running.items()}
+
+        # validation
+        if val_loader is not None:
+            val_metrics = _evaluate(model, val_loader, device, sample_dir=sample_dir, epoch=epoch)
+        else:
+            val_metrics = {'mse': float('nan'), 'mae': float('nan'), 'psnr': float('nan')}
+
+        print(f"  train: mse={train_metrics['mse']:.6f}  mae={train_metrics['mae']:.6f}")
+        print(f"  valid: mse={val_metrics['mse']:.6f}  mae={val_metrics['mae']:.6f}  psnr={val_metrics['psnr']:.2f} dB")
+
+        # save 'latest'
+        latest_path = os.path.join(ckpt_dir, 'latest.pt')
+        torch.save({'epoch': epoch, 'model': model.state_dict(), 'opt': opt.state_dict(), 'scaler': scaler.state_dict(),
+                    'best_val_mse': best_val_mse, }, latest_path)
+
+        # save best (by val MSE if val exists; otherwise by train MSE)
+        score = val_metrics['mse'] if not math.isnan(val_metrics['mse']) else train_metrics['mse']
+        if score < best_val_mse:
+            best_val_mse = score
+            best_path = os.path.join(ckpt_dir, 'best.pt')
+            torch.save(
+                {'epoch': epoch, 'model': model.state_dict(), 'opt': opt.state_dict(), 'scaler': scaler.state_dict(),
+                 'best_val_mse': best_val_mse, }, best_path)
+            print(f"  ↑ new best (mse {best_val_mse:.6f}) -> {best_path}")
+
+        # periodic
+        if save_every and (epoch % save_every == 0):
+            pth = os.path.join(ckpt_dir, f'ep{epoch:03d}.pt')
+            torch.save(
+                {'epoch': epoch, 'model': model.state_dict(), 'opt': opt.state_dict(), 'scaler': scaler.state_dict(),
+                 'best_val_mse': best_val_mse, }, pth)
+            print(f"  saved {pth}")
+
+        # store history row
+        row = {'epoch': epoch}
+        row.update({f"train_{k}": v for k, v in train_metrics.items()})
+        row.update({f"val_{k}": v for k, v in val_metrics.items()})
+        row['best_ckpt'] = best_path
+        history.append(row)
+
+    return {'history': history, 'best_ckpt': best_path, 'best_val_mse': best_val_mse, 'outdir': outdir, }
