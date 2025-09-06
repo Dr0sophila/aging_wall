@@ -3,7 +3,7 @@ import torch.nn as nn
 import math
 
 
-class ConvBlock(nn.Module):
+class DownBlock(nn.Module):
     """Conv -> GroupNorm -> SiLU, with optional downsampling via stride."""
 
     def __init__(self, in_ch, out_ch, stride=1):
@@ -45,7 +45,6 @@ class AutoEncoder1024(nn.Module):
     """
 
     def __init__(self, in_channels: int = 3, base_ch: int = 32,
-                 # width multiplier; use 16/32/64 depending on GPU memory
                  latent_dim: int = 1024):  # bottleneck size
         super().__init__()
 
@@ -60,13 +59,13 @@ class AutoEncoder1024(nn.Module):
         bottleneck_ch = base_ch * 8  # 256; spatial 8x8
 
         # Encoder: stride=2 in first conv of each block to downsample
-        self.enc1 = ConvBlock(in_channels, ch1, stride=2)  # 1024 -> 512
-        self.enc2 = ConvBlock(ch1, ch2, stride=2)  # 512  -> 256
-        self.enc3 = ConvBlock(ch2, ch3, stride=2)  # 256  -> 128
-        self.enc4 = ConvBlock(ch3, ch4, stride=2)  # 128  -> 64
-        self.enc5 = ConvBlock(ch4, ch5, stride=2)  # 64   -> 32
-        self.enc6 = ConvBlock(ch5, ch6, stride=2)  # 32   -> 16
-        self.enc7 = ConvBlock(ch6, ch7, stride=2)  # 16   -> 8
+        self.enc1 = DownBlock(in_channels, ch1, stride=2)  # 1024 -> 512
+        self.enc2 = DownBlock(ch1, ch2, stride=2)  # 512  -> 256
+        self.enc3 = DownBlock(ch2, ch3, stride=2)  # 256  -> 128
+        self.enc4 = DownBlock(ch3, ch4, stride=2)  # 128  -> 64
+        self.enc5 = DownBlock(ch4, ch5, stride=2)  # 64   -> 32
+        self.enc6 = DownBlock(ch5, ch6, stride=2)  # 32   -> 16
+        self.enc7 = DownBlock(ch6, ch7, stride=2)  # 16   -> 8
 
         # Flatten (256 * 8 * 8 = 16384 if base_ch=32) -> latent -> back
         enc_feat_dim = bottleneck_ch * 8 * 8

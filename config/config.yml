@@ -4,3 +4,5 @@ paths:
 
   o_negative_path: "E:/data/Aging_walls/negative"
   negative_path: "E:/data/Aging_walls/processed/negative"
+
+  lazy_positive: "E:/data/Aging_walls/negative"

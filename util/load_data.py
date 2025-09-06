@@ -5,17 +5,13 @@ import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 
-def load_images_as_tensor(
-    dir_path: str,
-    extensions: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"),
-    mode: str = "RGB",                       # "L" for grayscale, "RGB" for color
-    resize: Optional[Union[int, Tuple[int, int]]] = None,  # (H, W) or int for square
-    recursive: bool = False,
-    normalize: bool = True,               # scale to [0,1]
-    dtype: torch.dtype = torch.float32,
-    device: Optional[torch.device] = None,
-    return_paths: bool = False
-):
+
+def load_images_as_tensor(dir_path: str,
+                          extensions: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"),
+                          mode: str = "RGB", resize: Optional[Union[int, Tuple[int, int]]] = None,
+                          # (H, W) or int for square
+                          recursive: bool = False, normalize: bool = True,  # scale to [0,1]
+                          dtype: torch.dtype = torch.float32, device: Optional[torch.device] = None):
     """
     Load all images from dir_path into a stacked tensor [N, C, H, W].
     If 'resize' is None and images have different sizes, they are zero-padded to the max H/W.
@@ -24,6 +20,7 @@ def load_images_as_tensor(
         imgs: torch.Tensor [N, C, H, W]
         (optional) paths: List[str] in the same order as imgs
     """
+
     # Collect files
     def is_img(f: str) -> bool:
         return os.path.splitext(f)[1].lower() in extensions
@@ -46,7 +43,6 @@ def load_images_as_tensor(
         resize = (resize, resize)  # H, W
 
     tensors: List[torch.Tensor] = []
-    sizes: List[Tuple[int, int]] = []
 
     for fp in files:
         with Image.open(fp) as im:
@@ -66,32 +62,16 @@ def load_images_as_tensor(
             t = t.permute(2, 0, 1)  # [3, H, W]
         else:
             # add channel dim
-            t = t.unsqueeze(0)      # [1, H, W]
+            t = t.unsqueeze(0)  # [1, H, W]
 
         t = t.to(dtype)
         if normalize:
             t = t / 255.0
 
         tensors.append(t)
-        sizes.append((t.shape[1], t.shape[2]))  # (H, W)
 
-    # Ensure stackable: pad to max H/W if needed
-    H_max = max(h for h, _ in sizes)
-    W_max = max(w for _, w in sizes)
-
-    padded = []
-    for t in tensors:
-        _, h, w = t.shape
-        # pad format: (pad_left, pad_right, pad_top, pad_bottom)
-        pad = (0, W_max - w, 0, H_max - h)
-        if pad != (0, 0, 0, 0):
-            t = F.pad(t, pad, mode="constant", value=0)
-        padded.append(t)
-
-    imgs = torch.stack(padded, dim=0)  # [N, C, H_max, W_max]
+    imgs = torch.stack(tensors, dim=0)  # [N, C, H_max, W_max]
     if device is not None:
         imgs = imgs.to(device)
 
-    if return_paths:
-        return imgs, files
     return imgs
