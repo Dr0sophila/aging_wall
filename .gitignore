@@ -2,3 +2,8 @@
 test.ipynb
 __pycache__
 *.pt
+runs/*
+positive/*
+posdif/*
+negdif/*
+negative/*
