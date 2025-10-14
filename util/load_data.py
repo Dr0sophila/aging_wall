@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-
+from torch.utils.data import TensorDataset, DataLoader, random_split
 
 def load_images_as_tensor(dir_path: str,
                           extensions: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"),
@@ -75,3 +75,5 @@ def load_images_as_tensor(dir_path: str,
         imgs = imgs.to(device)
 
     return imgs
+
+
